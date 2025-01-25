@@ -32,7 +32,7 @@ type RealtimeSession = {
   }
   tool_choice: "auto"; // Literal string type
   temperature: number; // Number for temperature value
-  max_response_output_tokens: string | number; // String or number
+  max_response_output_tokens: "inf" | number; // String or number
   client_secret: {
     value: string; // Secret key as a string
     expires_at: number; // Unix timestamp (number)
