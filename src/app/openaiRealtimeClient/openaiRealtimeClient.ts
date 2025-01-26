@@ -3,7 +3,18 @@ import {ComponentRef } from "react";
 type MediaElement = ComponentRef<"audio">
 
 import { RealtimeEvent } from "./realtimeEvents";
-export async function initAudio(audioEl: MediaElement, EPHEMERAL_KEY:string, onEvent: (event: RealtimeEvent) => void) {
+export async function initAudio(
+    {
+        audioEl, 
+        EPHEMERAL_KEY, 
+        onEvent,
+        onRemoteStream
+    }: {
+        audioEl: MediaElement, 
+        EPHEMERAL_KEY:string, 
+        onEvent: (event: RealtimeEvent) => void,
+        onRemoteStream: (remoteStream :MediaStream)=> void
+    }) {
     console.log("initAudio")
 
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
@@ -11,12 +22,20 @@ export async function initAudio(audioEl: MediaElement, EPHEMERAL_KEY:string, onE
     audioEl.autoplay = true;
     
     const pc = new RTCPeerConnection();
-    pc.ontrack = e => audioEl.srcObject = e.streams[0];
+    pc.ontrack = e => {
+        audioEl.srcObject = e.streams[0];
+        const remoteStream = new MediaStream();
+        e.streams[0].getTracks().forEach((track) => {
+            remoteStream.addTrack(track);
+        });
+        onRemoteStream(remoteStream)
+    }
     // Add local audio track for microphone input in the browser
     const ms = await navigator.mediaDevices.getUserMedia({
         audio: true
     });
     pc.addTrack(ms.getTracks()[0]);
+    
 
     // Set up data channel for sending and receiving events
     const dc = pc.createDataChannel("oai-events");
@@ -43,7 +62,8 @@ export async function initAudio(audioEl: MediaElement, EPHEMERAL_KEY:string, onE
 
     const sdp = await sdpResponse.text()
     await pc.setRemoteDescription({type: "answer", sdp});
-    console.log("Session started!");
+    const mediaRecorder = new MediaRecorder(stream);
+    mediaRecorder.start();
      const stop = () => {
         if (dc.readyState === "open") { dc.close(); }
         pc.close();
@@ -53,6 +73,8 @@ export async function initAudio(audioEl: MediaElement, EPHEMERAL_KEY:string, onE
         audioEl.autoplay = false;
         audioEl.srcObject = null;   
     }
-    return {stop}
+    return {stop, recorder: mediaRecorder, localVoiceStream: ms}
 
 }
+
+export type AudioController = Awaited<ReturnType<typeof initAudio>>; 
