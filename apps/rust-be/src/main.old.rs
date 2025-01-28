@@ -1,11 +1,9 @@
-use axum::{routing::post, Json, Router};
-use serde::{Deserialize, Serialize};
-use tower_http::cors::{CorsLayer};
-
 use std::fs::File;
+use std::io::Write;
 use std::sync::Arc;
 
 use anyhow::Result;
+use clap::{AppSettings, Arg, Command};
 use tokio::sync::{Mutex, Notify};
 use tokio::time::Duration;
 use webrtc::api::interceptor_registry::register_default_interceptors;
@@ -24,53 +22,115 @@ use webrtc::rtp_transceiver::rtp_codec::{
 };
 use webrtc::track::track_remote::TrackRemote;
 
-#[derive(Deserialize)]
-struct SdpRequest {
-    sdp: String,
+async fn save_to_disk(
+    writer: Arc<Mutex<dyn webrtc::media::io::Writer + Send + Sync>>,
+    track: Arc<TrackRemote>,
+    notify: Arc<Notify>,
+) -> Result<()> {
+    loop {
+        tokio::select! {
+            result = track.read_rtp() => {
+                if let Ok((rtp_packet, _)) = result {
+                    let mut w = writer.lock().await;
+                    w.write_rtp(&rtp_packet)?;
+                }else{
+                    println!("file closing begin after read_rtp error");
+                    let mut w = writer.lock().await;
+                    if let Err(err) = w.close() {
+                        println!("file close err: {err}");
+                    }
+                    println!("file closing end after read_rtp error");
+                    return Ok(());
+                }
+            }
+            _ = notify.notified() => {
+                println!("file closing begin after notified");
+                let mut w = writer.lock().await;
+                if let Err(err) = w.close() {
+                    println!("file close err: {err}");
+                }
+                println!("file closing end after notified");
+                return Ok(());
+            }
+        }
+    }
 }
 
-#[derive(Serialize)]
-struct SdpResponse {
-    sdp: String,
-}
+#[tokio::main]
+async fn main() -> Result<()> {
+    let mut app = Command::new("save-to-disk-h264")
+        .version("0.1.0")
+        .author("Rain Liu <yliu@webrtc.rs>")
+        .about("An example of save-to-disk-h264.")
+        .setting(AppSettings::DeriveDisplayOrder)
+        .subcommand_negates_reqs(true)
+        .arg(
+            Arg::new("FULLHELP")
+                .help("Prints more detailed help information")
+                .long("fullhelp"),
+        )
+        .arg(
+            Arg::new("debug")
+                .long("debug")
+                .short('d')
+                .help("Prints debug log information"),
+        )
+        .arg(
+            Arg::new("video")
+                .required_unless_present("FULLHELP")
+                .takes_value(true)
+                .short('v')
+                .long("video")
+                .help("Video file to be streaming."),
+        )
+        .arg(
+            Arg::new("audio")
+                .required_unless_present("FULLHELP")
+                .takes_value(true)
+                .short('a')
+                .long("audio")
+                .help("Audio file to be streaming."),
+        );
 
-async fn record_handler(Json(payload): Json<SdpRequest>) -> Json<SdpResponse> {
-    let sdp = payload.sdp.clone();
-    println!("encoded sdp:");
-    // Spawn the record function in the background
-    let sdp_response = match tokio::spawn(async move {
-        println!("start spawn record sdp: {sdp}");
-        record(sdp).await
-    })
-    .await
-    {
-        Ok(Ok(sdp_response)) => sdp_response,
-        Ok(Err(err)) => {
-            println!("record error: {err}");
-            err.to_string()
-        }
-        Err(err) => {
-            println!("record spawn error: {err}");
-            err.to_string()
-        }
-    };
-    Json(SdpResponse { sdp: sdp_response })
-}
-async fn record(sdp: String) -> Result<String> {
-    let video_file = "video_file.h264";
-    let audio_file = "audio_file.ogg";
-    println!("----------- record sdp 0");
+    let matches = app.clone().get_matches();
+
+    if matches.is_present("FULLHELP") {
+        app.print_long_help().unwrap();
+        std::process::exit(0);
+    }
+
+    let debug = matches.is_present("debug");
+    if debug {
+        env_logger::Builder::new()
+            .format(|buf, record| {
+                writeln!(
+                    buf,
+                    "{}:{} [{}] {} - {}",
+                    record.file().unwrap_or("unknown"),
+                    record.line().unwrap_or(0),
+                    record.level(),
+                    chrono::Local::now().format("%H:%M:%S.%6f"),
+                    record.args()
+                )
+            })
+            .filter(None, log::LevelFilter::Trace)
+            .init();
+    }
+
+    let video_file = matches.value_of("video").unwrap();
+    let audio_file = matches.value_of("audio").unwrap();
 
     let h264_writer: Arc<Mutex<dyn webrtc::media::io::Writer + Send + Sync>> =
         Arc::new(Mutex::new(H264Writer::new(File::create(video_file)?)));
     let ogg_writer: Arc<Mutex<dyn webrtc::media::io::Writer + Send + Sync>> = Arc::new(Mutex::new(
         OggWriter::new(File::create(audio_file)?, 48000, 2)?,
     ));
+
     // Everything below is the WebRTC-rs API! Thanks for using it ❤️.
 
     // Create a MediaEngine object to configure the supported codec
     let mut m = MediaEngine::default();
-    println!("record 1");
+
     // Setup the codecs you want to use.
     // We'll use a H264 and Opus but you can also define your own
     m.register_codec(
@@ -102,7 +162,7 @@ async fn record(sdp: String) -> Result<String> {
         },
         RTPCodecType::Audio,
     )?;
-    println!("record 2");
+
     // Create a InterceptorRegistry. This is the user configurable RTP/RTCP Pipeline.
     // This provides NACKs, RTCP Reports and other features. If you use `webrtc.NewPeerConnection`
     // this is enabled by default. If you are manually managing You MUST create a InterceptorRegistry
@@ -111,13 +171,13 @@ async fn record(sdp: String) -> Result<String> {
 
     // Use the default set of Interceptors
     registry = register_default_interceptors(registry, &mut m)?;
-    println!("record 3");
+
     // Create the API object with the MediaEngine
     let api = APIBuilder::new()
         .with_media_engine(m)
         .with_interceptor_registry(registry)
         .build();
-    println!("record 4");
+
     // Prepare the configuration
     let config = RTCConfiguration {
         ice_servers: vec![RTCIceServer {
@@ -126,10 +186,10 @@ async fn record(sdp: String) -> Result<String> {
         }],
         ..Default::default()
     };
-    println!("record 5");
+
     // Create a new RTCPeerConnection
     let peer_connection = Arc::new(api.new_peer_connection(config).await?);
-    println!("record 6");
+
     // Allow us to receive 1 audio track, and 1 video track
     peer_connection
         .add_transceiver_from_kind(RTPCodecType::Audio, None)
@@ -145,7 +205,6 @@ async fn record(sdp: String) -> Result<String> {
     // an ivf file, since we could have multiple video tracks we provide a counter.
     // In your application this is where you would handle/process video
     let pc = Arc::downgrade(&peer_connection);
-    println!("record 7");
     peer_connection.on_track(Box::new(move |track, _, _| {
         // Send a PLI on an interval so that the publisher is pushing a keyframe every rtcpPLIInterval
         let media_ssrc = track.ssrc();
@@ -190,7 +249,7 @@ async fn record(sdp: String) -> Result<String> {
             }
         })
     }));
-    println!("record 8");
+
     let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     // Set the handler for ICE connection state
@@ -205,21 +264,21 @@ async fn record(sdp: String) -> Result<String> {
                 notify_tx.notify_waiters();
 
                 println!("Done writing media files");
+
                 let _ = done_tx.try_send(());
             }
             Box::pin(async {})
         },
     ));
-    println!("record 9");
-    let desc_data = signal::decode(&sdp)?;
-    println!("desc_data sdp:");
-    println!("{desc_data}");
-    println!("end desc_data sdp");
+
+    // Wait for the offer to be pasted
+    let line = signal::must_read_stdin()?;
+    let desc_data = signal::decode(line.as_str())?;
     let offer = serde_json::from_str::<RTCSessionDescription>(&desc_data)?;
 
+    // Set the remote SessionDescription
     peer_connection.set_remote_description(offer).await?;
-    println!("record 11");
-    
+
     // Create an answer
     let answer = peer_connection.create_answer(None).await?;
 
@@ -235,77 +294,27 @@ async fn record(sdp: String) -> Result<String> {
     let _ = gather_complete.recv().await;
 
     // Output the answer in base64 so we can paste it in browser
-    let b64 = if let Some(local_desc) = peer_connection.local_description().await {
+    if let Some(local_desc) = peer_connection.local_description().await {
         let json_str = serde_json::to_string(&local_desc)?;
         let b64 = signal::encode(&json_str);
-        println!("local_description setted!");
-        // println!("{b64}");
-        b64
+        println!("===== PRINT SDP ANSWER:");
+        println!("{b64}");
+        println!("===== PRINT SDP ANSWER END");
     } else {
         println!("generate local_description failed!");
-        String::new()
-    };
-    println!("record 12");
-
-    // println!("Press ctrl-c to stop");
-    // tokio::select! {
-    //     _ = done_rx.recv() => {
-    //         println!("received done signal!");
-    //     }
-    //     _ = tokio::signal::ctrl_c() => {
-    //         println!();
-    //     }
-    // };
-    println!("record 13");
-    // peer_connection.close().await?;
-    println!("record 14 - local_description returned");
-    Ok(b64)
-
-}
-
-#[tokio::main]
-async fn main() {
-    let app = Router::new()
-        .route("/records", post(record_handler))
-        .layer(CorsLayer::permissive());
-
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await.unwrap();
-    axum::serve(listener, app).await.unwrap();
-}
-
-async fn save_to_disk(
-    writer: Arc<Mutex<dyn webrtc::media::io::Writer + Send + Sync>>,
-    track: Arc<TrackRemote>,
-    notify: Arc<Notify>,
-) -> Result<()> {
-    println!("initialize save_to_disk");
-    loop {
-        tokio::select! {
-            result = track.read_rtp() => {
-                println!("track.read_rtp()");
-                if let Ok((rtp_packet, _)) = result {
-                    println!("track.read_rtp() Ok()");
-                    let mut w = writer.lock().await;
-                    w.write_rtp(&rtp_packet)?;
-                }else{
-                    println!("file closing begin after read_rtp error");
-                    let mut w = writer.lock().await;
-                    if let Err(err) = w.close() {
-                        println!("file close err: {err}");
-                    }
-                    println!("file closing end after read_rtp error");
-                    return Ok(());
-                }
-            }
-            _ = notify.notified() => {
-                println!("file closing begin after notified");
-                let mut w = writer.lock().await;
-                if let Err(err) = w.close() {
-                    println!("file close err: {err}");
-                }
-                println!("file closing end after notified");
-                return Ok(());
-            }
-        }
     }
+
+    println!("Press ctrl-c to stop");
+    tokio::select! {
+        _ = done_rx.recv() => {
+            println!("received done signal!");
+        }
+        _ = tokio::signal::ctrl_c() => {
+            println!();
+        }
+    };
+
+    peer_connection.close().await?;
+
+    Ok(())
 }
