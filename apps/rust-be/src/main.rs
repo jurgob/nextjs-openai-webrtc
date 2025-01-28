@@ -1,6 +1,6 @@
 use axum::{routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
-use tower_http::cors::{CorsLayer};
+use tower_http::cors::CorsLayer;
 
 use std::fs::File;
 use std::sync::Arc;
@@ -191,7 +191,7 @@ async fn record(sdp: String) -> Result<String> {
         })
     }));
     println!("record 8");
-    let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
+    // let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     // Set the handler for ICE connection state
     // This will notify you when the peer has connected/disconnected
@@ -205,7 +205,7 @@ async fn record(sdp: String) -> Result<String> {
                 notify_tx.notify_waiters();
 
                 println!("Done writing media files");
-                let _ = done_tx.try_send(());
+                // let _ = done_tx.try_send(());
             }
             Box::pin(async {})
         },

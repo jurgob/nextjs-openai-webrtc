@@ -1,0 +1,25 @@
+{
+    "$schema": "https://turbo.build/schema.json",
+    "ui": "tui",
+    "tasks": {
+      "build": {
+        "dependsOn": ["^build"],
+        "outputs": [".next/**", "!.next/cache/**"]
+      },
+      "check-types": {
+        "dependsOn": ["^check-types"]
+      },
+      "dev:next": {
+        "persistent": true,
+        "cache": false
+      },
+      "dev:rust": {
+        "persistent": true,
+        "cache": false
+      },
+      "dev:docker": {
+        "persistent": true,
+        "cache": false
+      }
+    }
+  }
